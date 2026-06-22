@@ -1,4 +1,4 @@
-import typescript from 'rollup-plugin-typescript2'
+import esbuild from 'rollup-plugin-esbuild'
 
 export default {
     input: 'src/app.ts',
@@ -9,5 +9,12 @@ export default {
     onwarn: (warning) => {
         if (warning.code === 'UNRESOLVED_IMPORT') return
     },
-    plugins: [typescript()],
+    plugins: [
+        esbuild({
+            target: 'es2022',
+            loaders: {
+                '.ts': 'ts',
+            },
+        }),
+    ],
 }
