@@ -28,6 +28,112 @@ const META_WHATSAPP_VERIFY_TOKEN = readEnv(
     'META_VERIFY_TOKEN'
 )
 
+const resolveEnvKey = (primary: string, ...fallbacks: string[]) => {
+    if (process.env[primary]?.trim()) return primary
+
+    for (const key of fallbacks) {
+        if (process.env[key]?.trim()) return key
+    }
+
+    return null
+}
+
+const logMetaEnv = () => {
+    console.log('[META_ENV]', {
+        tokenPresent: Boolean(META_WHATSAPP_TOKEN),
+        tokenLength: META_WHATSAPP_TOKEN?.length ?? 0,
+        tokenSource: resolveEnvKey('META_WHATSAPP_TOKEN'),
+        phoneNumberId: META_WHATSAPP_PHONE_NUMBER_ID ?? null,
+        phoneSource: resolveEnvKey(
+            'META_WHATSAPP_PHONE_NUMBER_ID',
+            'META_PHONE_NUMBER_ID'
+        ),
+        verifyPresent: Boolean(META_WHATSAPP_VERIFY_TOKEN),
+        verifyLength: META_WHATSAPP_VERIFY_TOKEN?.length ?? 0,
+        verifySource: resolveEnvKey(
+            'META_WHATSAPP_VERIFY_TOKEN',
+            'META_VERIFY_TOKEN'
+        ),
+    })
+}
+
+const logGraphError = (label: string, status: number, data: any) => {
+    console.error(label, {
+        status,
+        code: data?.error?.code ?? null,
+        type: data?.error?.type ?? null,
+        message: data?.error?.message ?? null,
+        fbtrace_id: data?.error?.fbtrace_id ?? null,
+    })
+}
+
+const validateMetaCredentials = async () => {
+    try {
+        const { token, phoneNumberId } = requireMetaConfig()
+
+        const hasAccessTokenWord = token.toLowerCase().includes('access token')
+        const hasNewline = /[\r\n]/.test(token)
+
+        console.log('[META_AUTH_CHECK]', {
+            tokenPresent: true,
+            tokenLength: token.length,
+            phoneNumberId,
+            hasAccessTokenWord,
+            hasNewline,
+        })
+
+        if (hasAccessTokenWord || hasNewline) {
+            console.error(
+                '[META_AUTH_CHECK]',
+                'Invalid token format in .env — use the token value only, one line, no label text.'
+            )
+        }
+
+        const meResponse = await fetch(
+            `https://graph.facebook.com/${META_API_VERSION}/me`,
+            {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            }
+        )
+        const meData = await meResponse.json()
+
+        if (!meResponse.ok) {
+            logGraphError('[META_AUTH_CHECK_ME]', meResponse.status, meData)
+        } else {
+            console.log('[META_AUTH_CHECK_ME]', {
+                status: meResponse.status,
+                ok: true,
+                name: meData.name ?? null,
+            })
+        }
+
+        const phoneResponse = await fetch(
+            `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}?fields=display_phone_number,verified_name`,
+            {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            }
+        )
+        const phoneData = await phoneResponse.json()
+
+        if (!phoneResponse.ok) {
+            logGraphError('[META_AUTH_CHECK_PHONE]', phoneResponse.status, phoneData)
+        } else {
+            console.log('[META_AUTH_CHECK_PHONE]', {
+                status: phoneResponse.status,
+                ok: true,
+                verifiedName: phoneData.verified_name ?? null,
+                displayPhoneNumber: phoneData.display_phone_number ?? null,
+            })
+        }
+    } catch (error) {
+        console.error('[META_AUTH_CHECK_FAILED]', error)
+    }
+}
+
 const sessions = new Map<string, AreasSession>()
 
 const requireMetaConfig = () => {
@@ -56,6 +162,14 @@ const requireMetaConfig = () => {
 const sendMetaText = async (to: string, body: string) => {
     const { token, phoneNumberId } = requireMetaConfig()
 
+    console.log('[META_SEND_TEXT]', {
+        to,
+        phoneNumberId,
+        tokenPresent: true,
+        tokenLength: token.length,
+        bodyLength: body.length,
+    })
+
     const response = await fetch(
         `https://graph.facebook.com/${META_API_VERSION}/${phoneNumberId}/messages`,
         {
@@ -78,9 +192,25 @@ const sendMetaText = async (to: string, body: string) => {
     const data = await response.json()
 
     if (!response.ok) {
-        console.error('[META_SEND_TEXT_ERROR]', data)
-        throw new Error('Failed to send text message')
+        logGraphError('[META_SEND_TEXT_ERROR]', response.status, data)
+
+        if (data?.error?.code === 190) {
+            console.error(
+                '[META_SEND_TEXT_ERROR]',
+                'Authentication Error (190): token expired, wrong app, missing WhatsApp permissions, or recipient not in test list for Development mode.'
+            )
+        }
+
+        throw new Error(
+            `Failed to send text message: ${data?.error?.message ?? response.status}`
+        )
     }
+
+    console.log('[META_SEND_TEXT_OK]', {
+        status: response.status,
+        to,
+        messageId: data?.messages?.[0]?.id ?? null,
+    })
 
     return data
 }
@@ -177,7 +307,9 @@ app.get('/webhook/meta', (req, res) => {
 
     console.error('[META_WEBHOOK_VERIFY_FAILED]', {
         mode,
-        token,
+        verifyTokenMatch: token === META_WHATSAPP_VERIFY_TOKEN,
+        expectedLength: META_WHATSAPP_VERIFY_TOKEN?.length ?? 0,
+        receivedLength: typeof token === 'string' ? token.length : 0,
     })
 
     res.sendStatus(403)
@@ -200,14 +332,11 @@ app.post('/webhook/meta', async (req, res) => {
     }
 })
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
     console.log(`[META_BOT_READY] http://localhost:${PORT}`)
     console.log(`[META_WEBHOOK] GET/POST /webhook/meta`)
-    console.log('[META_ENV]', {
-        token: META_WHATSAPP_TOKEN ? `loaded length=${META_WHATSAPP_TOKEN.length}` : 'missing',
-        phoneNumberId: META_WHATSAPP_PHONE_NUMBER_ID ?? 'missing',
-        verifyToken: META_WHATSAPP_VERIFY_TOKEN ? `loaded length=${META_WHATSAPP_VERIFY_TOKEN.length}` : 'missing',
-    })
+    logMetaEnv()
+    await validateMetaCredentials()
 })
 
 server.on('error', (error) => {
